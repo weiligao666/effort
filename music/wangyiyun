@@ -1,0 +1,393 @@
+package a1;
+    import org.jsoup.Jsoup;
+import org.jsoup.nodes.Document;
+import org.jsoup.nodes.Element;
+import org.jsoup.select.Elements;
+import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Scanner;
+
+public class NetEaseMusicCrawler {
+    private static final String BASE_URL = "https://music.163.com";
+    private static final String DOWNLOAD_DIR = "D:\\下载音乐";
+    private static final int SEARCH_TYPE_SONG = 1;
+    private static final int SEARCH_TYPE_ARTIST = 2;
+    private static final int SEARCH_TYPE_ALBUM = 3;
+    private static final int ARTIST_DETAIL = 4;
+    private static final HttpClient httpClient = HttpClient.newHttpClient();
+
+    public static void main(String[] args) {
+        Scanner scanner = new Scanner(System.in);
+        System.out.println("网易云音乐下载器");
+        System.out.println("1. 搜索歌曲");
+        System.out.println("2. 热门歌曲");
+        System.out.print("请选择: ");
+        
+        int choice = scanner.nextInt();
+        scanner.nextLine(); // 消耗换行符
+        
+        try {
+            if (choice == 1) {
+                System.out.println("请选择搜索类型:");
+                System.out.println("1. 按歌曲名搜索");
+                System.out.println("2. 按歌手搜索"); 
+                System.out.println("3. 按专辑搜索");
+                System.out.println("4. 查看歌手详情");
+                System.out.print("请选择: ");
+                int searchType = scanner.nextInt();
+                scanner.nextLine(); // 消耗换行符
+                
+                String keyword;
+                while(true) {
+                    System.out.print("请输入搜索关键词(输入q退出): ");
+                    String input = scanner.nextLine();
+                    if(input.equalsIgnoreCase("q")) {
+                        return;
+                    }
+                    
+                    // 获取搜索建议
+                    List<String> suggestions = getSearchSuggestions(input);
+                    if(!suggestions.isEmpty()) {
+                        System.out.println("搜索建议:");
+                        for(int i=0; i<suggestions.size(); i++) {
+                            System.out.printf("%d. %s%n", i+1, suggestions.get(i));
+                        }
+                        System.out.print("选择建议(0使用原输入): ");
+                        int suggestionChoice = scanner.nextInt();
+                        scanner.nextLine(); // 消耗换行符
+                        if(suggestionChoice > 0 && suggestionChoice <= suggestions.size()) {
+                            keyword = suggestions.get(suggestionChoice-1);
+                            break;
+                        }
+                    }
+                    keyword = input;
+                    break;
+                }
+                if (searchType == ARTIST_DETAIL) {
+                    showArtistDetail(keyword);
+                } else {
+                    searchAndDownload(keyword, searchType);
+                }
+            } else {
+                String playlistUrl = BASE_URL + "/discover/toplist";
+                String html = fetchHtml(playlistUrl);
+                parseSongList(html);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            scanner.close();
+        }
+    }
+
+    private static String fetchHtml(String url) throws IOException, InterruptedException {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("User-Agent", "Mozilla/5.0")
+                .build();
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        return response.body();
+    }
+
+    private static void searchAndDownload(String keyword, int searchType) throws IOException, InterruptedException {
+        int currentPage = 1;
+        final int pageSize = 20; // 每页显示20条结果
+        
+        while(true) {
+            String searchUrl;
+            switch(searchType) {
+                case SEARCH_TYPE_ARTIST:
+                    searchUrl = BASE_URL + "/search/?type=100"; // 歌手搜索
+                    break;
+                case SEARCH_TYPE_ALBUM:
+                    searchUrl = BASE_URL + "/search/?type=10"; // 专辑搜索
+                    break;
+                default: // SEARCH_TYPE_SONG
+                    searchUrl = BASE_URL + "/search/?type=1"; // 歌曲搜索
+            }
+            searchUrl += "&keyword=" + keyword.replace(" ", "+");
+            searchUrl += "&offset=" + ((currentPage-1)*pageSize);
+            searchUrl += "&limit=" + pageSize;
+        String html = fetchHtml(searchUrl);
+        Document doc = Jsoup.parse(html);
+        Elements allItems = doc.select(".srchsongst .item");
+        
+        // 模糊匹配：保留包含关键词的歌曲(不区分大小写)
+        List<Element> songItems = new ArrayList<>();
+        for (Element item : allItems) {
+            String title = item.select(".text").text().toLowerCase();
+            String artist = item.select(".s-fc8").text().toLowerCase();
+            if (title.contains(keyword.toLowerCase()) || 
+                artist.contains(keyword.toLowerCase())) {
+                songItems.add(item);
+            }
+        }
+        
+        if (songItems.isEmpty()) {
+            System.out.println("未找到匹配 '" + keyword + "' 的歌曲");
+            return;
+        }
+        
+        System.out.println("找到 " + songItems.size() + " 个匹配 '" + keyword + "' 的结果:");
+        System.out.println("----------------------------------");
+        
+        int index = 1;
+        for (Element item : songItems) {
+            String title = item.select(".text").text();
+            String artist = item.select(".s-fc8").text();
+            String songId = item.select(".text").attr("href").replace("/song?id=", "");
+            
+            System.out.printf("%2d. %s - %s%n", index++, title, artist);
+        }
+        
+        System.out.print("请选择要下载的歌曲编号(0返回): ");
+        Scanner scanner = new Scanner(System.in);
+        int choice = scanner.nextInt();
+        
+        if (choice > 0 && choice <= songItems.size()) {
+            Element selected = songItems.get(choice - 1);
+            String title = selected.select(".text").text();
+            String artist = selected.select(".s-fc8").text();
+            String duration = selected.select(".time").text();
+            String album = selected.select(".s-fc3").text();
+            String songId = selected.select(".text").attr("href").replace("/song?id=", "");
+            
+            System.out.println("歌曲: " + title);
+            System.out.println("歌手: " + artist);
+            System.out.println("时长: " + duration);
+            System.out.println("专辑: " + album);
+            
+            System.out.println("1. 下载");
+            System.out.println("2. 播放");
+            System.out.println("3. 返回");
+            System.out.print("请选择: ");
+            int action = scanner.nextInt();
+            
+            if (action == 1) {
+                String downloadUrl = "https://music.163.com/song/media/outer/url?id=" + songId + ".mp3";
+                downloadSong(downloadUrl, title + " - " + artist + ".mp3");
+            } else if (action == 2) {
+                String downloadUrl = "https://music.163.com/song/media/outer/url?id=" + songId + ".mp3";
+                playSong(downloadUrl);
+            }
+        } else if (choice == 0) {
+            // 返回上一级
+            scanner.close();
+            return;
+        }
+        
+        // 分页控制
+        System.out.println("\n当前第 " + currentPage + " 页");
+        System.out.println("1. 下一页");
+        System.out.println("2. 上一页");
+        System.out.println("3. 返回");
+        System.out.print("请选择: ");
+        int pageChoice = scanner.nextInt();
+        
+        if (pageChoice == 1) {
+            currentPage++;
+        } else if (pageChoice == 2 && currentPage > 1) {
+            currentPage--;
+        } else {
+            scanner.close();
+            return;
+        }
+        scanner.close();
+    }
+    }
+
+    private static List<String> getSearchSuggestions(String keyword) throws IOException, InterruptedException {
+        List<String> suggestions = new ArrayList<>();
+        try {
+            String suggestUrl = BASE_URL + "/search/suggest/web?keywords=" + keyword;
+            String response = fetchHtml(suggestUrl);
+            
+            // 简单解析JSONP响应，提取歌曲建议
+            // 响应格式如: callback({...})，我们需要提取{}中的内容
+            int start = response.indexOf('{');
+            int end = response.lastIndexOf('}');
+            if(start == -1 || end == -1) {
+                return suggestions;
+            }
+            
+            String json = response.substring(start, end+1);
+            
+            // 简单提取歌曲名 - 实际应该用JSON解析，这里简化处理
+            String[] parts = json.split("\"name\":\"");
+            for(int i=1; i<parts.length; i++) {
+                String name = parts[i].split("\"")[0];
+                if(!name.trim().isEmpty()) {
+                    suggestions.add(name);
+                    if(suggestions.size() >= 5) { // 最多返回5条建议
+                        break;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("获取搜索建议失败: " + e.getMessage());
+        }
+        return suggestions;
+    }
+
+    private static void showArtistDetail(String artistName) throws IOException, InterruptedException {
+        String artistUrl = BASE_URL + "/search/?type=100&keyword=" + artistName.replace(" ", "+");
+        String html = fetchHtml(artistUrl);
+        Document doc = Jsoup.parse(html);
+        
+        Element artistItem = doc.select(".srchsongst .item").first();
+        if (artistItem == null) {
+            System.out.println("未找到歌手: " + artistName);
+            return;
+        }
+        
+        String artistId = artistItem.select(".text").attr("href").replace("/artist?id=", "");
+        String detailUrl = BASE_URL + "/artist?id=" + artistId;
+        String detailHtml = fetchHtml(detailUrl);
+        Document detailDoc = Jsoup.parse(detailHtml);
+        
+        System.out.println("\n歌手详情:");
+        System.out.println("----------------------------------");
+        System.out.println("歌手: " + artistName);
+        
+        // 热门歌曲
+        Elements hotSongs = detailDoc.select(".n-songtb .item");
+        System.out.println("\n热门歌曲:");
+        for (int i = 0; i < Math.min(10, hotSongs.size()); i++) {
+            Element song = hotSongs.get(i);
+            String title = song.select(".text").text();
+            System.out.printf("%2d. %s%n", i+1, title);
+        }
+        
+        // 专辑
+        Elements albums = detailDoc.select(".n-album .item");
+        System.out.println("\n专辑列表:");
+        for (int i = 0; i < Math.min(5, albums.size()); i++) {
+            Element album = albums.get(i);
+            String title = album.select(".text").text();
+            System.out.printf("%2d. %s%n", i+1, title);
+        }
+        
+        System.out.println("----------------------------------");
+    }
+
+    private static void parseSongList(String html) throws IOException {
+        Document doc = Jsoup.parse(html);
+        Elements songItems = doc.select(".f-hide li a");
+        
+        System.out.println("网易云音乐热门歌曲:");
+        System.out.println("----------------------------------");
+        
+        // 创建下载目录
+        Path downloadsDir = Paths.get("downloads");
+        if (!Files.exists(downloadsDir)) {
+            Files.createDirectories(downloadsDir);
+        }
+
+        for (Element item : songItems) {
+            String title = item.text();
+            String artist = item.parent().select(".s-fc8").text();
+            if(artist.isEmpty()) {
+                artist = "未知歌手";
+            }
+            String songId = item.attr("href").replace("/song?id=", "");
+            
+            System.out.println("歌曲: " + title);
+            System.out.println("歌手: " + artist);
+            
+            // 下载歌曲
+            String downloadUrl = "https://music.163.com/song/media/outer/url?id=" + songId + ".mp3";
+            downloadSong(downloadUrl, title + " - " + artist + ".mp3");
+            
+            System.out.println("----------------------------------");
+        }
+    }
+
+    private static void playSong(String url) throws IOException {
+        try {
+            // 创建临时文件
+            Path tempFile = Files.createTempFile("netease", ".mp3");
+            
+            // 下载歌曲到临时文件
+            HttpClient client = HttpClient.newBuilder()
+                .followRedirects(HttpClient.Redirect.ALWAYS)
+                .build();
+                
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .header("User-Agent", "Mozilla/5.0")
+                    .build();
+            
+            HttpResponse<byte[]> response = client.send(
+                request, 
+                HttpResponse.BodyHandlers.ofByteArray()
+            );
+            
+            if (response.statusCode() == 200) {
+                Files.write(tempFile, response.body());
+                
+                // 调用系统默认播放器
+                String os = System.getProperty("os.name").toLowerCase();
+                if (os.contains("win")) {
+                    new ProcessBuilder("cmd", "/c", tempFile.toString()).start();
+                } else if (os.contains("mac")) {
+                    new ProcessBuilder("open", tempFile.toString()).start();
+                } else {
+                    new ProcessBuilder("xdg-open", tempFile.toString()).start();
+                }
+                
+                System.out.println("正在播放...");
+            }
+        } catch (Exception e) {
+            System.out.println("播放失败: " + e.getMessage());
+        }
+    }
+
+    private static void downloadSong(String url, String filename) throws IOException {
+        try {
+            // 创建允许重定向的HttpClient
+            HttpClient client = HttpClient.newBuilder()
+                .followRedirects(HttpClient.Redirect.ALWAYS)
+                .build();
+                
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+                    .header("Referer", "https://music.163.com/")
+                    .build();
+            
+            HttpResponse<byte[]> response = client.send(
+                request, 
+                HttpResponse.BodyHandlers.ofByteArray()
+            );
+            
+            if (response.statusCode() == 200) {
+                // 检查是否是MP3文件
+                if(response.headers().firstValue("Content-Type").orElse("").contains("audio/mpeg")) {
+                Path downloadPath = Paths.get(DOWNLOAD_DIR);
+                if (!Files.exists(downloadPath)) {
+                    Files.createDirectories(downloadPath);
+                }
+                Path filePath = downloadPath.resolve(filename);
+                    Files.write(filePath, response.body());
+                    System.out.println("下载成功: " + filename);
+                } else {
+                    System.out.println("下载失败: 获取到非音频文件");
+                }
+            } else {
+                System.out.println("下载失败: HTTP " + response.statusCode());
+            }
+        } catch (Exception e) {
+            System.out.println("下载出错: " + e.getMessage());
+        }
+    }
+}
+
+
